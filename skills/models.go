@@ -1,229 +1,79 @@
 package skills
 
 import (
-	"fmt"
-	"reflect"
-	"regexp"
-	"sort"
+	"html"
+	"strings"
 )
 
-var skillNamePattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+// DefaultSystemInstruction 是启用技能时注入的系统级指令。
+//
+// 是什么：
+// 这是一段预定义的提示词，告知 Agent 可以使用技能来增强能力。
+//
+// 为什么需要：
+// - 让 Agent 知道技能系统的存在
+// - 说明技能目录结构（SKILL.md、references/、assets/、scripts/）
+// - 指导 Agent 如何正确使用技能工具
+//
+// 怎么用：
+// 此指令会在 Agent 初始化时添加到系统提示中，与技能列表一起构成完整的技能说明。
+// Agent 会根据此指令的指引，在需要时使用 list_skills、load_skill 等工具。
+const DefaultSystemInstruction = `You can use specialized 'skills' to help you with complex tasks. You MUST use the skill tools to interact with these skills.
 
-// Frontmatter describes metadata in SKILL.md.
-type Frontmatter struct {
-	Name          string
-	Description   string
-	License       string
-	Compatibility string
-	AllowedTools  string
-	Metadata      map[string]any
-}
+Skills are folders of instructions and resources that extend your capabilities for specialized tasks. Each skill folder contains:
+- SKILL.md (required): The main instruction file with skill metadata and detailed markdown instructions.
+- references/ (optional): Additional documentation or examples for skill usage.
+- assets/ (optional): Templates, docs, or other resources used by the skill.
+- scripts/ (optional): Script files that can be inspected with load_skill_resource and executed with run_skill_script.
 
-// Validate validates skill frontmatter.
-func (f Frontmatter) Validate() error {
-	if len(f.Name) > 64 {
-		return fmt.Errorf("skills: name must be at most 64 characters")
+This is very important:
+1. If a skill seems relevant, use load_skill with name="<SKILL_NAME>" to read full instructions first.
+2. Once loaded, follow skill instructions exactly before replying.
+3. Use load_skill_resource for files inside references/, assets/, and scripts/.
+4. Use run_skill_script for scripts under scripts/ when execution is required.`
+
+// FormatSkillsAsXML 将技能列表格式化为 XML 块。
+//
+// 是什么：
+// 此函数将所有可用技能的信息转换为 XML 格式，供 Agent 在系统提示中查看。
+//
+// 为什么用 XML：
+// - 结构清晰，易于解析
+// - 与 Markdown 内容区分明显
+// - 便于 Agent 识别和提取技能信息
+//
+// 参数说明：
+// - skills: Skill 接口切片，包含所有已加载的技能
+//
+// 返回值：
+// - 格式化的 XML 字符串，包含所有技能的名称和描述
+// - 空技能列表返回空的 XML 块
+//
+// 怎么用：
+// 通常在 Toolset 初始化时调用，将结果添加到系统指令中。
+// Agent 看到 XML 后可以知道有哪些技能可用，然后决定是否加载。
+func FormatSkillsAsXML(skills []Skill) string {
+	if len(skills) == 0 {
+		return "<available_skills>\n</available_skills>"
 	}
-	if !skillNamePattern.MatchString(f.Name) {
-		return fmt.Errorf("skills: name must be lowercase kebab-case")
-	}
-	if f.Description == "" {
-		return fmt.Errorf("skills: description must not be empty")
-	}
-	if len(f.Description) > 1024 {
-		return fmt.Errorf("skills: description must be at most 1024 characters")
-	}
-	if len(f.Compatibility) > 500 {
-		return fmt.Errorf("skills: compatibility must be at most 500 characters")
-	}
-	return nil
-}
-
-// Resources keeps skill files by relative path.
-type Resources struct {
-	References map[string]string
-	Assets     map[string][]byte
-	Scripts    map[string]string
-}
-
-func (r Resources) GetReference(path string) (string, bool) {
-	v, ok := r.References[path]
-	return v, ok
-}
-
-func (r Resources) GetAsset(path string) ([]byte, bool) {
-	v, ok := r.Assets[path]
-	return v, ok
-}
-
-func (r Resources) GetScript(path string) (string, bool) {
-	v, ok := r.Scripts[path]
-	return v, ok
-}
-
-func (r Resources) ListReferences() []string {
-	return listKeys(r.References)
-}
-
-func (r Resources) ListAssets() []string {
-	return listKeys(r.Assets)
-}
-
-func (r Resources) ListScripts() []string {
-	return listKeys(r.Scripts)
-}
-
-func listKeys[T any](m map[string]T) []string {
-	if len(m) == 0 {
-		return nil
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
-// Skill is the minimal skill contract.
-type Skill interface {
-	Name() string
-	Description() string
-	Instruction() string
-}
-
-// FrontmatterProvider provides skill frontmatter data.
-type FrontmatterProvider interface {
-	Frontmatter() Frontmatter
-}
-
-// ResourcesProvider provides skill resources data.
-type ResourcesProvider interface {
-	Resources() Resources
-}
-
-// staticSkill is the default in-memory skill implementation.
-type staticSkill struct {
-	frontmatter Frontmatter
-	instruction string
-	resources   Resources
-}
-
-func (s *staticSkill) Name() string {
-	if s == nil {
-		return ""
-	}
-	return s.frontmatter.Name
-}
-
-func (s *staticSkill) Description() string {
-	if s == nil {
-		return ""
-	}
-	return s.frontmatter.Description
-}
-
-func (s *staticSkill) Instruction() string {
-	if s == nil {
-		return ""
-	}
-	return s.instruction
-}
-
-func (s *staticSkill) Frontmatter() Frontmatter {
-	if s == nil {
-		return Frontmatter{}
-	}
-	return s.frontmatter
-}
-
-func (s *staticSkill) Resources() Resources {
-	if s == nil {
-		return Resources{}
-	}
-	return s.resources
-}
-
-func normalizeMetadataMap(value any) (map[string]any, error) {
-	if value == nil {
-		return nil, nil
-	}
-	normalized, err := normalizeMetadataValue(value)
-	if err != nil {
-		return nil, err
-	}
-	items, ok := normalized.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("skills: metadata must be a map")
-	}
-	return items, nil
-}
-
-func normalizeMetadataValue(value any) (any, error) {
-	switch v := value.(type) {
-	case nil, string, bool,
-		int, int8, int16, int32, int64,
-		uint, uint8, uint16, uint32, uint64,
-		float32, float64:
-		return v, nil
-	case map[string]any:
-		out := make(map[string]any, len(v))
-		for key, item := range v {
-			normalized, err := normalizeMetadataValue(item)
-			if err != nil {
-				return nil, err
-			}
-			out[key] = normalized
+	lines := []string{"<available_skills>"}
+	for _, skill := range skills {
+		if skill == nil {
+			// 跳过 nil 技能，避免 panic
+			continue
 		}
-		return out, nil
-	case []any:
-		out := make([]any, len(v))
-		for i, item := range v {
-			normalized, err := normalizeMetadataValue(item)
-			if err != nil {
-				return nil, err
-			}
-			out[i] = normalized
-		}
-		return out, nil
+		// 使用 html.EscapeString 转义特殊字符，防止 XML 注入
+		lines = append(lines,
+			"<skill>",
+			"<name>",
+			html.EscapeString(skill.Name()),
+			"</name>",
+			"<description>",
+			html.EscapeString(skill.Description()),
+			"</description>",
+			"</skill>",
+		)
 	}
-
-	rv := reflect.ValueOf(value)
-	if !rv.IsValid() {
-		return nil, nil
-	}
-
-	switch rv.Kind() {
-	case reflect.Interface, reflect.Pointer:
-		if rv.IsNil() {
-			return nil, nil
-		}
-		return normalizeMetadataValue(rv.Elem().Interface())
-	case reflect.Map:
-		if rv.Type().Key().Kind() != reflect.String {
-			return nil, fmt.Errorf("skills: metadata map keys must be strings")
-		}
-		out := make(map[string]any, rv.Len())
-		iter := rv.MapRange()
-		for iter.Next() {
-			normalized, err := normalizeMetadataValue(iter.Value().Interface())
-			if err != nil {
-				return nil, err
-			}
-			out[iter.Key().String()] = normalized
-		}
-		return out, nil
-	case reflect.Slice, reflect.Array:
-		out := make([]any, rv.Len())
-		for i := range rv.Len() {
-			normalized, err := normalizeMetadataValue(rv.Index(i).Interface())
-			if err != nil {
-				return nil, err
-			}
-			out[i] = normalized
-		}
-		return out, nil
-	default:
-		return nil, fmt.Errorf("skills: metadata value of type %T is not JSON-compatible", value)
-	}
+	lines = append(lines, "</available_skills>")
+	return strings.Join(lines, "\n")
 }

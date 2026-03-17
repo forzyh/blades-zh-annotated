@@ -1,3 +1,16 @@
+// Package skills 提供技能（Skill）系统的核心功能。
+//
+// 技能是什么：
+// 技能是 blades 项目中用于扩展 Agent 能力的模块化单元。每个技能包含：
+// - 元数据（名称、描述、许可证等）
+// - 指令（SKILL.md 中的详细说明）
+// - 资源文件（references/、assets/、scripts/）
+//
+// 技能如何工作：
+// 1. 从目录或 embed.FS 加载技能
+// 2. 解析 SKILL.md 文件获取元数据和指令
+// 3. 将技能转换为工具（Tool）供 Agent 使用
+// 4. 通过工具集（Toolset）统一管理所有技能
 package skills
 
 import (
@@ -22,15 +35,26 @@ import (
 )
 
 const (
-	ToolListSkillsName        = "list_skills"
-	ToolLoadSkillName         = "load_skill"
+	// ToolListSkillsName 列出所有可用技能的工具名称
+	ToolListSkillsName = "list_skills"
+	// ToolLoadSkillName 加载指定技能指令的工具名称
+	ToolLoadSkillName = "load_skill"
+	// ToolLoadSkillResourceName 加载技能资源文件的工具名称
 	ToolLoadSkillResourceName = "load_skill_resource"
-	ToolRunSkillScriptName    = "run_skill_script"
+	// ToolRunSkillScriptName 执行技能脚本的工具名称
+	ToolRunSkillScriptName = "run_skill_script"
 
+	// defaultScriptTimeoutSeconds 脚本执行的默认超时时间（秒）
 	defaultScriptTimeoutSeconds = 300
+	// maxScriptTimeoutSeconds 脚本执行的最大超时时间（秒）
 	maxScriptTimeoutSeconds     = 1800
 )
 
+// coreSkillToolNames 核心技能工具的名称集合。
+//
+// 为什么需要：
+// 核心工具是技能系统的基础工具，不受 allowed-tools 限制，
+// 始终可用以保证技能系统的基本功能。
 var coreSkillToolNames = map[string]struct{}{
 	ToolListSkillsName:        {},
 	ToolLoadSkillName:         {},
@@ -38,27 +62,74 @@ var coreSkillToolNames = map[string]struct{}{
 	ToolRunSkillScriptName:    {},
 }
 
+// isCoreToolName 检查工具名称是否为核心工具。
+// 核心工具始终可用，不受 allowed-tools 过滤影响。
 func isCoreToolName(name string) bool {
 	_, ok := coreSkillToolNames[name]
 	return ok
 }
 
+// skillEntry 是技能的内部表示，包含技能实例及其元数据和资源。
+//
+// 为什么需要：
+// - 缓存已解析的元数据和资源，避免重复解析
+// - 统一管理技能的三个组成部分（Skill、Frontmatter、Resources）
 type skillEntry struct {
-	skill       Skill
-	frontmatter Frontmatter
-	resources   Resources
+	skill       Skill       // 技能实例
+	frontmatter Frontmatter // 技能元数据
+	resources   Resources   // 技能资源
 }
 
-// Toolset provides tools and instructions for loaded skills.
+// Toolset 提供已加载技能的工具和指令。
+//
+// 是什么：
+// Toolset 是技能系统的核心组件，它：
+// 1. 管理所有已加载的技能
+// 2. 提供 4 个核心工具（list_skills、load_skill、load_skill_resource、run_skill_script）
+// 3. 生成技能系统指令供 Agent 使用
+// 4. 支持 allowed-tools 过滤机制
+//
+// 为什么需要：
+// - 将技能转换为 Agent 可调用的工具
+// - 统一管理技能的访问权限
+// - 提供一致的技能使用接口
+//
+// 怎么用：
+// 1. 使用 NewToolset 创建工具集
+// 2. 调用 ComposeTools 将技能工具与基础工具合并
+// 3. 调用 Instruction 获取技能系统指令
 type Toolset struct {
-	skills              []Skill
-	skillByName         map[string]skillEntry
-	tools               []tools.Tool
+	// skills 所有已加载的技能列表
+	skills []Skill
+	// skillByName 按名称索引的技能，用于快速查找
+	skillByName map[string]skillEntry
+	// tools 4 个核心技能工具
+	tools []tools.Tool
+	// allowedToolPatterns 所有技能允许的工具模式集合
 	allowedToolPatterns []string
-	instruction         string
+	// instruction 技能系统的完整指令（包含 DefaultSystemInstruction 和技能列表）
+	instruction string
 }
 
-// NewToolset creates a new skill toolset.
+// NewToolset 创建一个新的技能工具集。
+//
+// 参数说明：
+// - skills: Skill 接口切片，包含所有要加载的技能
+//
+// 处理流程：
+// 1. 遍历每个技能，解析并验证元数据
+// 2. 检查技能名称唯一性
+// 3. 收集所有 allowed-tools 模式
+// 4. 生成技能系统指令
+// 5. 创建 4 个核心工具
+//
+// 返回值：
+// - 成功：返回 Toolset 实例和 nil 错误
+// - 失败：返回 nil 和具体错误（元数据验证失败、名称重复等）
+//
+// 怎么用：
+// skills, _ := NewFromDir("./skills")
+// toolset, err := NewToolset(skills)
 func NewToolset(skills []Skill) (*Toolset, error) {
 	ts := &Toolset{
 		skills:      make([]Skill, 0, len(skills)),
@@ -66,18 +137,23 @@ func NewToolset(skills []Skill) (*Toolset, error) {
 	}
 	for _, skill := range skills {
 		if skill == nil {
+			// 跳过 nil 技能
 			continue
 		}
+		// 解析技能元数据
 		frontmatter, err := resolveFrontmatter(skill)
 		if err != nil {
 			return nil, err
 		}
+		// 验证元数据合法性
 		if err := frontmatter.Validate(); err != nil {
 			return nil, err
 		}
+		// 检查名称唯一性
 		if _, exists := ts.skillByName[skill.Name()]; exists {
 			return nil, fmt.Errorf("skills: duplicate skill name %q", skill.Name())
 		}
+		// 存储技能条目
 		ts.skillByName[skill.Name()] = skillEntry{
 			skill:       skill,
 			frontmatter: frontmatter,
@@ -85,12 +161,15 @@ func NewToolset(skills []Skill) (*Toolset, error) {
 		}
 		ts.skills = append(ts.skills, skill)
 	}
+	// 收集所有 allowed-tools 模式
 	allowedToolPatternSet := make(map[string]struct{})
 	for _, entry := range ts.skillByName {
 		for _, pattern := range splitAllowedToolPatterns(entry.frontmatter.AllowedTools) {
+			// 验证模式语法
 			if _, err := path.Match(pattern, "tool-name"); err != nil {
 				return nil, fmt.Errorf("skills: invalid allowed-tools pattern %q in skill %q: %w", pattern, entry.skill.Name(), err)
 			}
+			// 去重
 			if _, exists := allowedToolPatternSet[pattern]; exists {
 				continue
 			}
@@ -99,10 +178,12 @@ func NewToolset(skills []Skill) (*Toolset, error) {
 		}
 	}
 	sort.Strings(ts.allowedToolPatterns)
+	// 生成技能系统指令
 	ts.instruction = strings.Join([]string{
 		DefaultSystemInstruction,
 		FormatSkillsAsXML(ts.skills),
 	}, "\n\n")
+	// 创建 4 个核心工具
 	ts.tools = []tools.Tool{
 		&listSkillsTool{toolset: ts},
 		&loadSkillTool{toolset: ts},
@@ -112,11 +193,18 @@ func NewToolset(skills []Skill) (*Toolset, error) {
 	return ts, nil
 }
 
+// resolveFrontmatter 解析技能的完整元数据。
+//
+// 处理逻辑：
+// 1. 从 Skill 接口获取基本信息（Name、Description）
+// 2. 如果技能实现了 FrontmatterProvider 接口，获取扩展元数据
+// 3. 标准化 Metadata 字段
 func resolveFrontmatter(skill Skill) (Frontmatter, error) {
 	f := Frontmatter{
 		Name:        skill.Name(),
 		Description: skill.Description(),
 	}
+	// 检查是否实现了 FrontmatterProvider 接口
 	provider, ok := skill.(FrontmatterProvider)
 	if !ok {
 		return f, nil
@@ -125,6 +213,7 @@ func resolveFrontmatter(skill Skill) (Frontmatter, error) {
 	f.License = frontmatter.License
 	f.Compatibility = frontmatter.Compatibility
 	f.AllowedTools = frontmatter.AllowedTools
+	// 标准化 Metadata
 	if len(frontmatter.Metadata) > 0 {
 		metadata, err := normalizeMetadataMap(frontmatter.Metadata)
 		if err != nil {
@@ -135,6 +224,12 @@ func resolveFrontmatter(skill Skill) (Frontmatter, error) {
 	return f, nil
 }
 
+// resolveResources 解析技能的资源文件。
+//
+// 处理逻辑：
+// 1. 检查技能是否实现了 ResourcesProvider 接口
+// 2. 如果实现，返回资源集合
+// 3. 否则返回空的 Resources
 func resolveResources(skill Skill) Resources {
 	provider, ok := skill.(ResourcesProvider)
 	if !ok {
@@ -143,14 +238,41 @@ func resolveResources(skill Skill) Resources {
 	return provider.Resources()
 }
 
-// Tools returns skill tools.
+// Tools 返回技能工具集的 4 个核心工具。
+//
+// 返回值：
+// 工具列表包含：
+// 1. list_skills - 列出所有可用技能
+// 2. load_skill - 加载指定技能的指令
+// 3. load_skill_resource - 加载技能的资源文件
+// 4. run_skill_script - 执行技能的脚本
+//
+// 注意：
+// 返回的是拷贝，修改不会影响内部状态。
 func (t *Toolset) Tools() []tools.Tool {
 	out := make([]tools.Tool, 0, len(t.tools))
 	out = append(out, t.tools...)
 	return out
 }
 
-// ComposeTools merges base tools with skill tools and applies allowed-tools filtering.
+// ComposeTools 合并基础工具与技能工具，并应用 allowed-tools 过滤。
+//
+// 参数说明：
+// - base: 基础工具列表（如文件读写、网络请求等）
+//
+// 处理逻辑：
+// 1. 合并基础工具和技能工具
+// 2. 如果设置了 allowed-tools，过滤不在允许列表中的工具
+// 3. 核心工具始终保留
+//
+// 过滤规则：
+// - 核心工具（list_skills 等）始终保留
+// - 工具名称匹配 allowed-tools 模式的保留
+// - allowed-tools 为空时不过滤
+//
+// 怎么用：
+// tools := toolset.ComposeTools(baseTools)
+// agent := NewAgent(tools)
 func (t *Toolset) ComposeTools(base []tools.Tool) []tools.Tool {
 	out := make([]tools.Tool, 0, len(base)+len(t.tools))
 	out = append(out, base...)
@@ -161,6 +283,7 @@ func (t *Toolset) ComposeTools(base []tools.Tool) []tools.Tool {
 	filtered := make([]tools.Tool, 0, len(out))
 	for _, tool := range out {
 		name := tool.Name()
+		// 核心工具或匹配模式的工具保留
 		if isCoreToolName(name) || matchesAllowedPattern(name, t.allowedToolPatterns) {
 			filtered = append(filtered, tool)
 		}
@@ -168,6 +291,8 @@ func (t *Toolset) ComposeTools(base []tools.Tool) []tools.Tool {
 	return filtered
 }
 
+// matchesAllowedPattern 检查工具名称是否匹配任何允许的模式。
+// 支持 glob 模式匹配（如 "read_*"、"*-file" 等）。
 func matchesAllowedPattern(toolName string, patterns []string) bool {
 	for _, pattern := range patterns {
 		match, err := path.Match(pattern, toolName)
@@ -181,11 +306,20 @@ func matchesAllowedPattern(toolName string, patterns []string) bool {
 	return false
 }
 
-// Instruction returns the instruction block for skills.
+// Instruction 返回技能系统的完整指令。
+//
+// 返回值：
+// 包含两部分的组合指令：
+// 1. DefaultSystemInstruction - 技能系统使用说明
+// 2. FormatSkillsAsXML - 可用技能列表
+//
+// 怎么用：
+// 在 Agent 初始化时将此指令添加到系统提示中。
 func (t *Toolset) Instruction() string {
 	return t.instruction
 }
 
+// skillNotFound 生成技能未找到的错误响应。
 func skillNotFound(name string) string {
 	return mustJSON(map[string]any{
 		"error":      fmt.Sprintf("Skill %q not found.", name),
@@ -193,6 +327,7 @@ func skillNotFound(name string) string {
 	})
 }
 
+// invalidArgs 生成无效参数的错误响应。
 func invalidArgs(msg string) string {
 	return mustJSON(map[string]any{
 		"error":      msg,
@@ -200,6 +335,8 @@ func invalidArgs(msg string) string {
 	})
 }
 
+// mustJSON 将值序列化为 JSON 字符串。
+// 失败时返回通用错误响应，避免 panic。
 func mustJSON(v any) string {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -208,6 +345,8 @@ func mustJSON(v any) string {
 	return string(b)
 }
 
+// toFrontmatterMap 将 Frontmatter 转换为 map 格式。
+// 用于 JSON 响应，只包含非空字段。
 func toFrontmatterMap(f Frontmatter) map[string]any {
 	out := map[string]any{
 		"name":        f.Name,
@@ -228,6 +367,7 @@ func toFrontmatterMap(f Frontmatter) map[string]any {
 	return out
 }
 
+// listSkillsTool 列出所有可用技能的工具实现。
 type listSkillsTool struct {
 	toolset *Toolset
 }
@@ -247,10 +387,13 @@ func (t *listSkillsTool) InputSchema() *jsonschema.Schema {
 
 func (t *listSkillsTool) OutputSchema() *jsonschema.Schema { return nil }
 
+// Handle 处理列出技能的请求。
+// 返回 XML 格式的技能列表。
 func (t *listSkillsTool) Handle(ctx context.Context, input string) (string, error) {
 	return FormatSkillsAsXML(t.toolset.skills), nil
 }
 
+// loadSkillTool 加载指定技能指令的工具实现。
 type loadSkillTool struct {
 	toolset *Toolset
 }
@@ -276,6 +419,8 @@ func (t *loadSkillTool) InputSchema() *jsonschema.Schema {
 
 func (t *loadSkillTool) OutputSchema() *jsonschema.Schema { return nil }
 
+// Handle 处理加载技能的请求。
+// 返回技能的指令、元数据等信息。
 func (t *loadSkillTool) Handle(ctx context.Context, input string) (string, error) {
 	var req struct {
 		Name string `json:"name"`
@@ -300,6 +445,7 @@ func (t *loadSkillTool) Handle(ctx context.Context, input string) (string, error
 	}), nil
 }
 
+// loadSkillResourceTool 加载技能资源文件的工具实现。
 type loadSkillResourceTool struct {
 	toolset *Toolset
 }
@@ -329,6 +475,8 @@ func (t *loadSkillResourceTool) InputSchema() *jsonschema.Schema {
 
 func (t *loadSkillResourceTool) OutputSchema() *jsonschema.Schema { return nil }
 
+// Handle 处理加载技能资源的请求。
+// 资源内容以 base64 编码返回。
 func (t *loadSkillResourceTool) Handle(ctx context.Context, input string) (string, error) {
 	var req struct {
 		SkillName string `json:"skill_name"`
@@ -353,6 +501,7 @@ func (t *loadSkillResourceTool) Handle(ctx context.Context, input string) (strin
 	if !ok {
 		return skillNotFound(req.SkillName), nil
 	}
+	// 解析资源路径，确定资源类型
 	resourceType, resourceName, err := normalizeResourcePath(req.Path)
 	if err != nil {
 		return mustJSON(map[string]any{
@@ -397,6 +546,7 @@ func (t *loadSkillResourceTool) Handle(ctx context.Context, input string) (strin
 	}), nil
 }
 
+// runSkillScriptTool 执行技能脚本的工具实现。
 type runSkillScriptTool struct {
 	toolset *Toolset
 }
@@ -439,6 +589,21 @@ func (t *runSkillScriptTool) InputSchema() *jsonschema.Schema {
 
 func (t *runSkillScriptTool) OutputSchema() *jsonschema.Schema { return nil }
 
+// Handle 处理执行脚本的请求。
+//
+// 处理流程：
+// 1. 解析并验证请求参数
+// 2. 查找技能和脚本
+// 3. 创建临时工作目录
+// 4. 将技能资源写入工作目录
+// 5. 执行脚本并捕获输出
+// 6. 清理临时目录
+//
+// 安全措施：
+// - 脚本路径必须相对，防止目录遍历攻击
+// - 环境变量名称验证，防止注入
+// - 超时控制，防止无限执行
+// - 临时目录隔离，防止污染主机
 func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, error) {
 	var req struct {
 		SkillName      string            `json:"skill_name"`
@@ -466,6 +631,7 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 	if !ok {
 		return skillNotFound(req.SkillName), nil
 	}
+	// 解析并验证脚本路径
 	scriptName, fullScriptPath, err := normalizeScriptPath(req.ScriptPath)
 	if err != nil {
 		return mustJSON(map[string]any{
@@ -481,6 +647,7 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 		}), nil
 	}
 
+	// 处理超时参数
 	timeoutSeconds := req.TimeoutSeconds
 	if timeoutSeconds == 0 {
 		timeoutSeconds = defaultScriptTimeoutSeconds
@@ -491,6 +658,7 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 			"error_code": "INVALID_TIMEOUT",
 		}), nil
 	}
+	// 验证环境变量
 	for key, value := range req.Env {
 		if key == "" ||
 			strings.Contains(key, "=") ||
@@ -503,6 +671,7 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 		}
 	}
 
+	// 创建临时工作目录
 	tmpRoot, err := os.MkdirTemp("", "blades-skill-*")
 	if err != nil {
 		return mustJSON(map[string]any{
@@ -512,6 +681,7 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 	}
 	defer os.RemoveAll(tmpRoot)
 
+	// 将技能资源写入工作目录
 	if err := materializeSkillWorkspace(tmpRoot, resources); err != nil {
 		return mustJSON(map[string]any{
 			"error":      fmt.Sprintf("Failed to materialize skill workspace: %v", err),
@@ -522,6 +692,17 @@ func (t *runSkillScriptTool) Handle(ctx context.Context, input string) (string, 
 	return executeSkillScript(ctx, tmpRoot, req.SkillName, fullScriptPath, req.Args, req.Env, timeoutSeconds), nil
 }
 
+// normalizeResourcePath 解析资源路径，返回资源类型和相对路径。
+//
+// 支持的路径前缀：
+// - references/ - 参考文档
+// - assets/ - 资源文件
+// - scripts/ - 脚本文件
+//
+// 安全措施：
+// - 路径必须是相对的
+// - 防止目录遍历（..）
+// - 支持 Windows 路径分隔符转换
 func normalizeResourcePath(resourcePath string) (resourceType string, resourceName string, err error) {
 	resourcePath = strings.TrimSpace(resourcePath)
 	resourcePath = strings.ReplaceAll(resourcePath, "\\", "/")
@@ -545,6 +726,8 @@ func normalizeResourcePath(resourcePath string) (resourceType string, resourceNa
 	return resourceType, resourceName, nil
 }
 
+// splitAllowedToolPatterns 解析 allowed-tools 字符串为模式列表。
+// 支持逗号或空格分隔的模式。
 func splitAllowedToolPatterns(raw string) []string {
 	items := strings.FieldsFunc(raw, func(r rune) bool {
 		return r == ',' || unicode.IsSpace(r)
@@ -560,6 +743,8 @@ func splitAllowedToolPatterns(raw string) []string {
 	return out
 }
 
+// normalizeScriptPath 解析脚本路径，返回脚本名称和完整路径。
+// 自动去除 scripts/ 前缀并进行路径规范化。
 func normalizeScriptPath(scriptPath string) (scriptName string, fullScriptPath string, err error) {
 	scriptPath = strings.TrimSpace(scriptPath)
 	scriptPath = strings.ReplaceAll(scriptPath, "\\", "/")
@@ -571,6 +756,18 @@ func normalizeScriptPath(scriptPath string) (scriptName string, fullScriptPath s
 	return clean, path.Join("scripts", clean), nil
 }
 
+// materializeSkillWorkspace 将技能资源写入临时工作目录。
+//
+// 处理流程：
+// 1. 遍历 references/、assets/、scripts/ 的所有文件
+// 2. 创建对应的子目录
+// 3. 写入文件内容
+// 4. 脚本文件设置可执行权限（0755）
+//
+// 为什么需要：
+// - 为脚本执行提供隔离的工作空间
+// - 确保脚本可以访问同技能的资源文件
+// - 执行完成后自动清理，不留痕迹
 func materializeSkillWorkspace(root string, resources Resources) error {
 	for rel, content := range resources.References {
 		if err := writeWorkspaceFile(root, "references", rel, []byte(content), 0o644); err != nil {
@@ -590,6 +787,12 @@ func materializeSkillWorkspace(root string, resources Resources) error {
 	return nil
 }
 
+// writeWorkspaceFile 向工作目录写入文件。
+//
+// 安全措施：
+// - 验证路径的相对性
+// - 防止目录遍历攻击
+// - 自动创建必要的父目录
 func writeWorkspaceFile(root string, dir string, rel string, content []byte, mode fs.FileMode) error {
 	clean, err := normalizeSkillRelativePath(rel)
 	if err != nil {
@@ -602,6 +805,7 @@ func writeWorkspaceFile(root string, dir string, rel string, content []byte, mod
 	if err != nil {
 		return err
 	}
+	// 检查是否尝试跳出目录
 	if relToBase == ".." || strings.HasPrefix(relToBase, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("invalid file path %q", rel)
 	}
@@ -611,6 +815,8 @@ func writeWorkspaceFile(root string, dir string, rel string, content []byte, mod
 	return os.WriteFile(targetPath, content, mode)
 }
 
+// normalizeSkillRelativePath 规范化相对路径。
+// 返回清理后的路径或错误。
 func normalizeSkillRelativePath(rel string) (string, error) {
 	rel = strings.TrimSpace(rel)
 	rel = strings.ReplaceAll(rel, "\\", "/")
@@ -621,6 +827,13 @@ func normalizeSkillRelativePath(rel string) (string, error) {
 	return clean, nil
 }
 
+// isInvalidSkillRelativePath 检查路径是否为无效的相对路径。
+// 无效情况：
+// - 空路径
+// - 当前目录（.）或父目录（..）
+// - 以 ../ 开头
+// - 绝对路径
+// - Windows 卷标前缀（如 C:）
 func isInvalidSkillRelativePath(clean string) bool {
 	return clean == "" ||
 		clean == "." ||
@@ -630,6 +843,7 @@ func isInvalidSkillRelativePath(clean string) bool {
 		hasWindowsVolumePrefix(clean)
 }
 
+// hasWindowsVolumePrefix 检查路径是否有 Windows 卷标前缀（如 C:）。
 func hasWindowsVolumePrefix(p string) bool {
 	if len(p) < 2 {
 		return false
@@ -637,6 +851,12 @@ func hasWindowsVolumePrefix(p string) bool {
 	return ((p[0] >= 'a' && p[0] <= 'z') || (p[0] >= 'A' && p[0] <= 'Z')) && p[1] == ':'
 }
 
+// mergeCommandEnv 合并基础环境变量和覆盖环境变量。
+//
+// 处理逻辑：
+// 1. 复制基础环境变量
+// 2. 移除被覆盖的变量
+// 3. 添加覆盖的变量（按字母排序）
 func mergeCommandEnv(base []string, overrides map[string]string) []string {
 	if len(overrides) == 0 {
 		out := make([]string, len(base))
@@ -665,6 +885,23 @@ func mergeCommandEnv(base []string, overrides map[string]string) []string {
 	return out
 }
 
+// executeSkillScript 执行技能脚本。
+//
+// 参数说明：
+// - ctx: 上下文，用于取消和超时控制
+// - tmpRoot: 临时工作目录
+// - skillName: 技能名称
+// - scriptPath: 脚本相对路径
+// - args: 脚本参数
+// - env: 环境变量
+// - timeoutSeconds: 超时时间（秒）
+//
+// 执行流程：
+// 1. 创建带超时的上下文
+// 2. 根据脚本扩展名确定解释器（.py -> python3, .sh/.bash -> bash）
+// 3. 执行命令并捕获输出
+// 4. 处理超时和错误
+// 5. 返回执行结果（stdout、stderr、exit_code、status）
 func executeSkillScript(
 	ctx context.Context,
 	tmpRoot string,
@@ -701,6 +938,7 @@ func executeSkillScript(
 	if err != nil {
 		switch {
 		case errors.Is(timeoutCtx.Err(), context.DeadlineExceeded):
+			// 超时错误
 			exitCode = -1
 			status = "timeout"
 		default:

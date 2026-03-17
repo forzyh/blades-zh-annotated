@@ -1,12 +1,44 @@
+// Package deep 提供了 DeepAgent 的核心指令和工具定义。
+// DeepAgent 是一个支持复杂任务处理的智能体，具有任务分解、子代理派生等功能。
+// 本包包含：
+// - 基础 Agent 指令模板
+// - write_todos 工具：用于管理复杂任务的任务列表
+// - task 工具：用于派生子代理执行独立任务
 package deep
 
 import "html/template"
 
+// BaseAgentPrompt 是基础 Agent 提示语，作为所有 Agent 的通用指令前缀。
+// 它告知 Agent 可以访问各种标准工具来完成用户请求的任务。
 var (
-	BaseAgentPrompt         = `In order to complete the objective that the user asks of you, you have access to a number of standard tools.`
-	generalAgentName        = "general-purpose"
+	BaseAgentPrompt = `In order to complete the objective that the user asks of you, you have access to a number of standard tools.`
+
+	// generalAgentName 是通用子代理的名称标识。
+	// 当没有其他专用代理可用时，使用此通用代理处理各种任务。
+	generalAgentName = "general-purpose"
+
+	// generalAgentDescription 描述了通用子代理的职责和能力范围。
+	// 该代理适用于：
+	// - 研究复杂问题和搜索文件内容
+	// - 执行多步骤任务
+	// - 当主代理不确定能否找到正确匹配时的备选搜索
+	// 它拥有与主代理相同的工具访问权限。
 	generalAgentDescription = `General-purpose agent for researching complex questions, searching for files and content, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you. This agent has access to all tools as the main agent.`
 
+	// writeTodosToolPrompt 是 write_todos 工具的使用说明提示语。
+	// 该工具用于帮助 Agent 管理和规划复杂任务。
+	//
+	// 核心用途：
+	// 1. 将复杂目标分解为可管理的小步骤
+	// 2. 跟踪每个步骤的完成状态
+	// 3. 为用户提供进度可见性
+	//
+	// 使用原则：
+	// - 立即标记完成的步骤，不要批量更新
+	// - 简单目标（少于 3 步）直接完成，无需使用此工具
+	// - 复杂多步任务才值得使用，因为会消耗额外的 Token
+	// - 可以并行调用多个任务工具，但不能并行调用同一个 write_todos 工具
+	// - 根据新信息可以修订待办列表，删除不再相关的任务或添加新任务
 	writeTodosToolPrompt = `## 'write_todos'
 
 You have access to the 'write_todos' tool to help you manage and plan complex objectives.
@@ -21,6 +53,39 @@ Writing todos takes time and tokens, use it when it is helpful for managing comp
 - The 'write_todos' tool should never be called multiple times in parallel.
 - Don't be afraid to revise the To-Do list as you go. New information may reveal new tasks that need to be done, or old tasks that are irrelevant.`
 
+	// writeTodosToolDescription 是 write_todos 工具的简短描述，用于工具的 schema 定义。
+	// 它告诉 Agent 何时使用以及如何使用此工具。
+	//
+	// 使用场景（何时调用）：
+	// 1. 复杂多步骤任务：需要 3 个或以上不同步骤的任务
+	// 2. 非平凡任务：需要仔细规划或多步操作的任务
+	// 3. 用户明确要求使用待办列表
+	// 4. 用户提供多个任务（编号或逗号分隔的列表）
+	// 5. 计划可能需要根据前几步的结果进行修订
+	//
+	// 使用方法：
+	// 1. 开始任务前将其标记为 in_progress
+	// 2. 完成任务后立即标记为 completed
+	// 3. 可以更新未来任务（删除不需要的或添加新发现的）
+	// 4. 不要修改已完成的任务
+	// 5. 可以一次性更新多个任务状态（如完成当前任务并同时标记下一个为进行中）
+	//
+	// 不建议使用的场景：
+	// 1. 单一、简单的任务
+	// 2. 微不足道的任务（跟踪没有价值）
+	// 3. 少于 3 步就能完成的任务
+	// 4. 纯对话或信息性质的交互
+	//
+	// 任务状态说明：
+	// - pending: 任务尚未开始
+	// - in_progress: 正在进行中（可以有多个不相关的任务同时进行）
+	// - completed: 任务已成功完成
+	//
+	// 重要提醒：
+	// - 创建待办列表时，立即将第一个（或前几个）任务标记为 in_progress
+	// - 除非所有任务都完成，否则应始终保持至少一个任务为 in_progress 状态
+	// - 只有在完全完成任务时才标记为 completed
+	// - 遇到错误或阻塞时保持任务为 in_progress，并创建新任务描述需要解决的问题
 	writeTodosToolDescription = `Use this tool to create and manage a structured task list for your current work session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
 
 Only use this tool if you think it will be helpful in staying organized. If the user's request is trivial and takes less than 3 steps, it is better to NOT use this tool and just do the task directly.
@@ -81,6 +146,35 @@ It is important to skip using this tool when:
 Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully
 Remember: If you only need to make a few tool calls to complete a task, and it is clear what you need to do, it is better to just do the task directly and NOT call this tool at all.`
 
+	// taskPrompt 是 task 工具（子代理派生工具）的使用说明提示语。
+	//
+	// 什么是子代理？
+	// 子代理是短暂存在的独立 Agent 实例，用于处理隔离的复杂任务。
+	// 它们在任务完成后立即销毁，只返回最终的结构化结果。
+	//
+	// 何时使用 task 工具：
+	// 1. 任务复杂且多步骤，可以完全委托给独立代理处理
+	// 2. 任务相互独立，可以并行执行
+	// 3. 任务需要大量推理或消耗大量 Token/上下文，会膨胀主线程
+	// 4. 沙箱隔离提高可靠性（如代码执行、结构化搜索、数据格式化）
+	// 5. 只关心输出结果，不关心中间推理过程
+	//
+	// 子代理生命周期：
+	// 1. Spawn（派生）：提供清晰的角色、指令和预期输出
+	// 2. Run（运行）：子代理自主完成任务
+	// 3. Return（返回）：子代理返回单一结构化结果
+	// 4. Reconcile（整合）：将结果整合到主线程
+	//
+	// 何时不使用 task 工具：
+	// 1. 需要查看子代理的中间推理或步骤（因为 task 工具会隐藏它们）
+	// 2. 任务简单（几次工具调用或简单查找）
+	// 3. 委托不能减少 Token 使用、复杂度或上下文切换
+	// 4. 拆分只会增加延迟而没有收益
+	//
+	// 重要提示：
+	// - 尽可能并行化工作（工具调用和任务）
+	// - 对于多部分目标中的独立任务，使用 task 工具隔离
+	// - 当任务复杂且独立时，应使用 task 工具派生子代理
 	taskPrompt = `## 'task' (subagent spawner)
 
 You have access to a 'task' tool to launch short-lived subagents that handle isolated tasks. These agents are ephemeral — they live only for the duration of the task and return a single result.
@@ -109,7 +203,19 @@ When NOT to use the task tool:
 - Remember to use the 'task' tool to silo independent tasks within a multi-part objective.
 - You should use the 'task' tool whenever you have a complex task that will take multiple steps, and is independent from other tasks that the agent needs to complete. These agents are highly competent and efficient.`
 
-	taskToolDescription = `Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows. 
+	// taskToolDescription 是 task 工具的描述模板，支持动态注入子代理列表。
+	// 该模板会在运行时根据实际可用的子代理生成完整的工具描述。
+	//
+	// 使用须知：
+	// 1. 尽可能并行启动多个代理以最大化性能
+	// 2. 代理完成后返回单一消息，结果对用户不可见，需主动发送文本消息转述
+	// 3. 每次代理调用是无状态的，无法发送额外消息或接收中间输出
+	// 4. 因此提示语中应包含详细的任务描述，让代理自主完成并返回预期格式的结果
+	// 5. 代理的输出通常应该被信任
+	// 6. 明确告知代理是创建内容、进行分析还是仅做研究
+	// 7. 如果代理描述提到应主动使用，则应尽力在用户未明确要求前使用它
+	// 8. 当只有通用代理可用时，应用它处理所有任务以隔离上下文和 Token 使用
+	taskToolDescription = `Launch an ephemeral subagent to handle complex, multi-step independent tasks with isolated context windows.
 
 Available agent types and the tools they have access to:
 {{.SubAgents}}
@@ -219,5 +325,7 @@ Since the user is greeting, use the greeting-responder agent to respond with a f
 assistant: "I'm going to use the Task tool to launch with the greeting-responder agent"
 </example>`
 
+	// taskToolDescriptionTmpl 是用于生成 task 工具描述的 Go 模板实例。
+	// 模板执行时会注入 SubAgents 变量，包含可用的子代理列表及其描述。
 	taskToolDescriptionTmpl = template.Must(template.New("task_tool_description").Parse(taskToolDescription))
 )
